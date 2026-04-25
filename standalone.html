@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BTC/USDT トレード監視ダッシュボード</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Tailwind CDN では animate-spin / animate-pulse が組み込み済み */
+    body { background-color: #0f172a; }
+    .snap-x { scroll-snap-type: x mandatory; }
+    .snap-start { scroll-snap-align: start; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React 18 UMD -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel: JSX をブラウザでトランスパイル -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel" data-presets="react">
+    "use strict";
+    const { useState, useEffect, useCallback } = React;
+
+    /* ═══════════════════════════════════════════════════════════════
+       テクニカル指標計算ロジック
+    ═══════════════════════════════════════════════════════════════ */
+
+    function calcSMA(vals, period) {
+      if (vals.length < period) return [];
+      const out = [];
+      for (let i = period - 1; i < vals.length; i++) {
+        const sl = vals.slice(i - period + 1, i + 1);
+        out.push(sl.reduce((a, b) => a + b, 0) / period);
+      }
+      return out;
+    }
+
+    function calcEMA(vals, period) {
+      if (vals.length < period) return [];
+      const k = 2 / (period + 1);
+      let ema = vals.slice(0, period).reduce((a, b) => a + b, 0) / period;
+      const out = [ema];
+      for (let i = period; i < vals.length; i++) {
+        ema = vals[i] * k + ema * (1 - k);
+        out.push(ema);
+      }
+      return out;
+    }
+
+    function calcBB(vals, period = 20, mult = 2) {
+      if (vals.length < period) return [];
+      const out = [];
+      for (let i = period - 1; i < vals.length; i++) {
+        const sl = vals.slice(i - period + 1, i + 1);
+        const mean = sl.reduce((a, b) => a + b, 0) / period;
+        const std = Math.sqrt(sl.reduce((s, v) => s + (v - mean) ** 2, 0) / period);
+        const upper = mean + mult * std;
+        const lower = mean - mult * std;
+        out.push({ upper, middle: mean, lower, width: ((upper - lower) / mean) * 100 });
+      }
+      return out;
+    }
+
+    function calcRSI(vals, period = 14) {
+      if (vals.length < period + 1) return [];
+      const ch = vals.slice(1).map((v, i) => v - vals[i]);
+      let ag = 0, al = 0;
+      for (let i = 0; i < period; i++) {
+        if (ch[i] > 0) ag += ch[i]; else al += Math.abs(ch[i]);
+      }
+      ag /= period; al /= period;
+      const rsi = (g, l) => l === 0 ? 100 : 100 - 100 / (1 + g / l);
+      const out = [rsi(ag, al)];
+      for (let i = period; i < ch.length; i++) {
+        ag = (ag * (period - 1) + Math.max(ch[i], 0)) / period;
+        al = (al * (period - 1) + Math.max(-ch[i], 0)) / period;
+        out.push(rsi(ag, al));
+      }
+      return out;
+    }
+
+    function calcATR(klines, period = 14) {
+      if (klines.length < 2) return [];
+      const trs = klines.slice(1).map((k, i) =>
+        Math.max(k.high - k.low, Math.abs(k.high - klines[i].close), Math.abs(k.low - klines[i].close))
+      );
+      if (trs.length < period) return [];
+      let atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+      const out = [atr];
+      for (let i = period; i < trs.length; i++) {
+        atr = (atr * (period - 1) + trs[i]) / period;
+        out.push(atr);
+      }
+      return out;
+    }
+
+    function calcMACD(vals, fast = 12, slow = 26, sig = 9) {
+      const ef = calcEMA(vals, fast);
+      const es = calcEMA(vals, slow);
+      if (es.length === 0) return [];
+      const off = slow - fast;
+      const ml = es.map((s, i) => ef[i + off] - s);
+      const sl = calcEMA(ml, sig);
+      if (sl.length === 0) return [];
+      const so = sig - 1;
+      return sl.map((s, i) => {
+        const m = ml[i + so];
+        return { macd: m, signal: s, histogram: m - s };
+      });
+    }
+
+    function calcZScore(vals, period = 20) {
+      if (vals.length < period) return [];
+      const out = [];
+      for (let i = period - 1; i < vals.length; i++) {
+        const sl = vals.slice(i - period + 1, i + 1);
+        const mean = sl.reduce((a, b) => a + b, 0) / period;
+        const std = Math.sqrt(sl.reduce((s, v) => s + (v - mean) ** 2, 0) / period);
+        out.push(std === 0 ? 0 : (vals[i] - mean) / std);
+      }
+      return out;
+    }
+
+    function calcHurst(closes) {
+      if (closes.length < 20) return 0.5;
+      const rets = closes.slice(1).map((v, i) => Math.log(v / closes[i]));
+      const lags = [4, 8, 16].filter(l => l < rets.length / 2);
+      if (lags.length < 2) return 0.5;
+      const lRS = [], lL = [];
+      for (const lag of lags) {
+        const n = Math.floor(rets.length / lag);
+        let tot = 0, cnt = 0;
+        for (let s = 0; s < n; s++) {
+          const sl = rets.slice(s * lag, (s + 1) * lag);
+          const mn = sl.reduce((a, b) => a + b, 0) / lag;
+          let cum = 0;
+          const cd = sl.map(v => { cum += v - mn; return cum; });
+          const rng = Math.max(...cd) - Math.min(...cd);
+          const std = Math.sqrt(sl.reduce((a, v) => a + (v - mn) ** 2, 0) / lag);
+          if (std > 0) { tot += rng / std; cnt++; }
+        }
+        if (cnt > 0) { lRS.push(Math.log(tot / cnt)); lL.push(Math.log(lag)); }
+      }
+      if (lL.length < 2) return 0.5;
+      const n = lL.length;
+      const sx = lL.reduce((a, b) => a + b, 0);
+      const sy = lRS.reduce((a, b) => a + b, 0);
+      const sxy = lL.reduce((s, x, i) => s + x * lRS[i], 0);
+      const sx2 = lL.reduce((s, x) => s + x * x, 0);
+      const d = n * sx2 - sx * sx;
+      return d === 0 ? 0.5 : Math.max(0.1, Math.min(0.9, (n * sxy - sx * sy) / d));
+    }
+
+    function getSMASlope(sma) {
+      if (sma.length < 5) return { dir: 'flat', rate: 0 };
+      const rate = ((sma[sma.length - 1] - sma[sma.length - 5]) / sma[sma.length - 5]) * 100;
+      return rate > 0.05 ? { dir: 'up', rate } : rate < -0.05 ? { dir: 'down', rate } : { dir: 'flat', rate };
+    }
+
+    function getBBStatus(bbs) {
+      if (bbs.length < 20) return 'normal';
+      const rec = bbs.slice(-20);
+      const cur = rec[rec.length - 1].width;
+      const avg = rec.slice(0, -1).reduce((s, b) => s + b.width, 0) / (rec.length - 1);
+      return cur < avg * 0.75 ? 'squeeze' : cur > avg * 1.30 ? 'expanding' : 'normal';
+    }
+
+    function getEntrySignal(slopes, statuses) {
+      const allUp = slopes.every(s => s === 'up');
+      const allDown = slopes.every(s => s === 'down');
+      const sq = statuses.includes('squeeze');
+      if (allUp && sq)   return { signal: 'long',  label: 'LONG候補 ★★',  reason: '全時間足上昇 + BBスクイーズ — ブレイクアウト警戒' };
+      if (allDown && sq) return { signal: 'short', label: 'SHORT候補 ★★', reason: '全時間足下落 + BBスクイーズ — ブレイクダウン警戒' };
+      if (allUp)         return { signal: 'long',  label: 'LONG傾向',     reason: '全時間足でSMAが上昇中' };
+      if (allDown)       return { signal: 'short', label: 'SHORT傾向',    reason: '全時間足でSMAが下落中' };
+      return { signal: 'wait', label: '待機', reason: '時間足のトレンドが不一致 — エントリー非推奨' };
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       Binance API フェッチ + 指標計算
+    ═══════════════════════════════════════════════════════════════ */
+
+    async function fetchKlines(symbol, interval, limit = 100) {
+      const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = await res.json();
+      return raw.map(k => ({
+        openTime: k[0], open: +k[1], high: +k[2], low: +k[3],
+        close: +k[4], volume: +k[5], closeTime: k[6],
+      }));
+    }
+
+    function buildIndicators(klines) {
+      const cl = klines.map(k => k.close);
+
+      const smaV  = calcSMA(cl, 20);
+      const bbV   = calcBB(cl, 20, 2);
+      const { dir: smaSlope, rate: smaSlopeRate } = getSMASlope(smaV);
+      const bbStatus  = getBBStatus(bbV);
+      const price     = cl[cl.length - 1];
+      const lastSMA   = smaV[smaV.length - 1];
+      const lastBB    = bbV[bbV.length - 1];
+
+      const rsiV = calcRSI(cl, 14);
+      const rsi  = rsiV.length ? rsiV[rsiV.length - 1] : 50;
+      const rsiStatus = rsi >= 70 ? 'overbought' : rsi <= 30 ? 'oversold' : 'neutral';
+
+      const atrV = calcATR(klines, 14);
+      const atr  = atrV.length ? atrV[atrV.length - 1] : 0;
+
+      const macdV = calcMACD(cl);
+      const lastM = macdV[macdV.length - 1];
+      const prevM = macdV[macdV.length - 2];
+      let macdCross = 'none';
+      if (lastM && prevM) {
+        if (prevM.histogram <= 0 && lastM.histogram > 0) macdCross = 'bullish';
+        else if (prevM.histogram >= 0 && lastM.histogram < 0) macdCross = 'bearish';
+      }
+
+      const zV = calcZScore(cl, 20);
+      const z  = zV.length ? zV[zV.length - 1] : 0;
+
+      const hurst = calcHurst(cl);
+
+      return {
+        price, lastSMA, smaSlope, smaSlopeRate,
+        deviation: ((price - lastSMA) / lastSMA) * 100,
+        lastBB, bbStatus,
+        rsi, rsiStatus,
+        atrPct: price > 0 ? (atr / price) * 100 : 0,
+        macdHist: lastM ? lastM.histogram : 0, macdCross,
+        zScore: z,
+        hurst,
+        hurstLabel: hurst > 0.55 ? 'トレンド持続' : hurst < 0.45 ? '平均回帰' : 'ランダム',
+      };
+    }
+
+    const IVLIST = ['15m', '1h', '4h'];
+    const INIT = { '15m': { d: null, loading: true, err: null }, '1h': { d: null, loading: true, err: null }, '4h': { d: null, loading: true, err: null } };
+
+    function useMarketData(sym = 'BTCUSDT') {
+      const [data, setData] = useState(INIT);
+      const [lastAt, setLastAt] = useState(null);
+
+      const load = useCallback(async () => {
+        setData(prev => {
+          const next = { ...prev };
+          IVLIST.forEach(iv => { next[iv] = { ...prev[iv], loading: true, err: null }; });
+          return next;
+        });
+        const res = await Promise.allSettled(IVLIST.map(iv => fetchKlines(sym, iv, 100)));
+        const upd = {};
+        res.forEach((r, i) => {
+          const iv = IVLIST[i];
+          if (r.status === 'fulfilled') {
+            upd[iv] = { d: buildIndicators(r.value), loading: false, err: null };
+          } else {
+            upd[iv] = { d: null, loading: false, err: r.reason.message || 'エラー' };
+          }
+        });
+        setData(prev => ({ ...prev, ...upd }));
+        setLastAt(new Date());
+      }, [sym]);
+
+      useEffect(() => {
+        load();
+        const t = setInterval(load, 60000);
+        return () => clearInterval(t);
+      }, [load]);
+
+      return { data, lastAt, reload: load };
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       UI 定数
+    ═══════════════════════════════════════════════════════════════ */
+
+    const SLOPE_C = {
+      up:   { icon: '↑', col: 'text-green-400',  txt: '上昇' },
+      down: { icon: '↓', col: 'text-red-400',    txt: '下落' },
+      flat: { icon: '→', col: 'text-yellow-400', txt: '横ばい' },
+    };
+    const BB_C = {
+      squeeze:   { col: 'text-yellow-300', bg: 'bg-yellow-400/10', bd: 'border-yellow-400/30', badge: '⚡ スクイーズ' },
+      expanding: { col: 'text-blue-300',   bg: 'bg-blue-400/10',   bd: 'border-blue-400/30',   badge: '💥 拡張中' },
+      normal:    { col: 'text-slate-400',  bg: 'bg-slate-700/50',  bd: 'border-slate-600',      badge: '○ 通常' },
+    };
+    const RSI_C = {
+      overbought: { col: 'text-red-400',   lbl: '買われ過ぎ' },
+      oversold:   { col: 'text-green-400', lbl: '売られ過ぎ' },
+      neutral:    { col: 'text-slate-300', lbl: '中立' },
+    };
+    const SIG_C = {
+      long:  { col: 'text-green-300',  bg: 'bg-green-500/10',  bd: 'border-green-500/30',  ico: '🟢' },
+      short: { col: 'text-red-300',    bg: 'bg-red-500/10',    bd: 'border-red-500/30',    ico: '🔴' },
+      wait:  { col: 'text-yellow-300', bg: 'bg-yellow-500/10', bd: 'border-yellow-500/30', ico: '🟡' },
+    };
+    const TF = [
+      { iv: '15m', label: '15分足' },
+      { iv: '1h',  label: '1時間足' },
+      { iv: '4h',  label: '4時間足' },
+    ];
+
+    const fmt = v => v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const sign = v => (v >= 0 ? '+' : '') + v.toFixed(2);
+    const sign3 = v => (v >= 0 ? '+' : '') + v.toFixed(3);
+
+    /* ═══════════════════════════════════════════════════════════════
+       コンポーネント
+    ═══════════════════════════════════════════════════════════════ */
+
+    function Row({ label, value, col = 'text-slate-300' }) {
+      return (
+        <div className="flex justify-between items-center min-w-0">
+          <span className="text-slate-500 shrink-0 mr-2">{label}</span>
+          <span className={`font-mono tabular-nums truncate ${col}`}>{value}</span>
+        </div>
+      );
+    }
+
+    function Skeleton() {
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden animate-pulse" style={{ minHeight: '360px' }}>
+          <div className="px-4 py-3 border-b border-slate-700 flex justify-between">
+            <div className="h-4 bg-slate-700 rounded w-16" />
+            <div className="h-5 bg-slate-700 rounded w-24" />
+          </div>
+          <div className="p-4 space-y-3">
+            {[100,72,55,100,80,65,90,60,75,50].map((w, i) => (
+              <div key={i} className="h-3 bg-slate-700 rounded" style={{ width: w + '%' }} />
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Card({ label, state }) {
+      if (state.loading) return <Skeleton />;
+
+      if (state.err) return (
+        <div className="bg-slate-800 rounded-xl border border-red-500/30 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-700">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">{label}</span>
+          </div>
+          <div className="p-4 space-y-2">
+            <p className="text-red-400 text-sm break-all">⚠️ {state.err}</p>
+            <p className="text-xs text-slate-500">
+              インターネット接続と Binance API へのアクセスを確認してください。<br />
+              地域によって <code>api.binance.com</code> がブロックされる場合があります。
+            </p>
+          </div>
+        </div>
+      );
+
+      if (!state.d) return null;
+
+      const { price, lastSMA, smaSlope, smaSlopeRate, deviation,
+              lastBB, bbStatus, rsi, rsiStatus, atrPct,
+              macdHist, macdCross, zScore, hurst, hurstLabel } = state.d;
+
+      const sl  = SLOPE_C[smaSlope];
+      const bb  = BB_C[bbStatus];
+      const rc  = RSI_C[rsiStatus];
+      const devCol   = deviation > 0.5 ? 'text-green-400' : deviation < -0.5 ? 'text-red-400' : 'text-slate-400';
+      const zCol     = zScore > 1.5 ? 'text-red-400' : zScore < -1.5 ? 'text-green-400' : 'text-slate-300';
+      const hCol     = hurst > 0.55 ? 'text-green-400' : hurst < 0.45 ? 'text-purple-400' : 'text-slate-400';
+      const mhCol    = macdHist >= 0 ? 'text-green-400' : 'text-red-400';
+      const mCrossLbl = macdCross === 'bullish' ? '↑上抜' : macdCross === 'bearish' ? '↓下抜' : '';
+
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 hover:border-slate-500 transition-colors overflow-hidden">
+          {/* ヘッダー */}
+          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-700">
+            <span className="text-sm font-bold text-slate-200 uppercase tracking-widest">{label}</span>
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${bb.bg} ${bb.bd} ${bb.col}`}>
+              {bb.badge}
+            </span>
+          </div>
+
+          <div className="p-4 space-y-4">
+            {/* SMA */}
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wide mb-1.5">SMA (20)</p>
+              <div className="flex items-baseline justify-between mb-2">
+                <span className="text-lg font-mono font-semibold text-white">${fmt(lastSMA)}</span>
+                <span className={`text-sm font-bold ${sl.col}`}>{sl.icon} {sl.txt}</span>
+              </div>
+              <div className="space-y-1 text-xs">
+                <Row label="SMA変化率(5本)" value={sign3(smaSlopeRate) + '%'} col={sl.col} />
+                <Row label="価格乖離"       value={sign(deviation) + '%'}    col={devCol} />
+              </div>
+            </div>
+
+            <div className="border-t border-slate-700/60" />
+
+            {/* ボリンジャーバンド */}
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wide mb-1.5">ボリンジャーバンド (20, ±2σ)</p>
+              <div className="flex items-baseline justify-between mb-2">
+                <span className={`text-2xl font-mono font-bold ${bb.col}`}>{lastBB.width.toFixed(2)}%</span>
+                <span className="text-xs text-slate-500">バンド幅</span>
+              </div>
+              <div className="space-y-1 text-xs">
+                <Row label="Upper"  value={'$' + fmt(lastBB.upper)}  col="text-green-400" />
+                <Row label="Middle" value={'$' + fmt(lastBB.middle)} />
+                <Row label="Lower"  value={'$' + fmt(lastBB.lower)}  col="text-red-400" />
+              </div>
+            </div>
+
+            <div className="border-t border-slate-700/60" />
+
+            {/* 追加指標 */}
+            <div>
+              <p className="text-xs text-slate-500 uppercase tracking-wide mb-1.5">追加指標</p>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500 shrink-0 mr-2">RSI (14)</span>
+                  <span className={`font-mono ${rc.col}`}>
+                    {rsi.toFixed(1)}
+                    <span className="text-slate-500 ml-1">({rc.lbl})</span>
+                  </span>
+                </div>
+                <Row label="ATR% (14)"   value={atrPct.toFixed(2) + '%'} />
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500 shrink-0 mr-2">MACD Hist</span>
+                  <span className={`font-mono ${mhCol}`}>
+                    {(macdHist >= 0 ? '+' : '') + macdHist.toFixed(1)}
+                    {mCrossLbl && <span className="ml-1 text-xs text-slate-400">{mCrossLbl}</span>}
+                  </span>
+                </div>
+                <Row label="Z-Score (20)" value={(zScore >= 0 ? '+' : '') + zScore.toFixed(2)} col={zCol} />
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-500 shrink-0 mr-2">Hurst指数</span>
+                  <span className={`font-mono ${hCol}`}>
+                    {hurst.toFixed(2)}
+                    <span className="text-slate-500 ml-1">({hurstLabel})</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ─── Dashboard ────────────────────────────────────────────── */
+
+    function SpinIcon({ spin }) {
+      return (
+        <svg className={`w-5 h-5 ${spin ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+      );
+    }
+
+    function App() {
+      const { data, lastAt, reload } = useMarketData('BTCUSDT');
+      const [spinning, setSpinning] = useState(false);
+
+      const price = data['15m'].d && data['15m'].d.price;
+      const allOk = TF.every(t => data[t.iv].d !== null);
+
+      const sig = allOk ? getEntrySignal(
+        TF.map(t => data[t.iv].d.smaSlope),
+        TF.map(t => data[t.iv].d.bbStatus),
+      ) : null;
+      const sc = sig ? SIG_C[sig.signal] : null;
+
+      const onRefresh = async () => {
+        setSpinning(true);
+        await reload();
+        setSpinning(false);
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-900 text-white">
+
+          {/* ── Sticky Header ── */}
+          <header className="sticky top-0 z-10 border-b border-slate-800 px-4 py-3"
+            style={{ backgroundColor: 'rgba(15,23,42,0.97)', backdropFilter: 'blur(8px)' }}>
+            <div className="max-w-5xl mx-auto flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h1 className="text-base sm:text-xl font-bold leading-tight truncate">
+                  <span className="text-yellow-400">BTC/USDT</span>
+                  <span className="text-slate-200 ml-1.5">トレード監視</span>
+                </h1>
+                <p className="text-slate-500 text-xs hidden sm:block mt-0.5">無駄なエントリーを極限まで減らすダッシュボード</p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                {price != null && (
+                  <div className="text-right">
+                    <div className="text-xs text-slate-500 uppercase tracking-wide leading-none mb-0.5">現在価格</div>
+                    <div className="text-lg sm:text-2xl font-mono font-bold text-white leading-tight">
+                      ${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                  </div>
+                )}
+                <button onClick={onRefresh} disabled={spinning}
+                  className="w-11 h-11 flex items-center justify-center rounded-xl bg-slate-700 hover:bg-slate-600 active:bg-slate-500 transition-colors text-slate-300 hover:text-white disabled:opacity-40"
+                  style={{ touchAction: 'manipulation' }}>
+                  <SpinIcon spin={spinning} />
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <main className="max-w-5xl mx-auto px-4 pt-4 pb-10 space-y-4">
+
+            {/* ── Entry Signal ── */}
+            {sig && sc && (
+              <div className={`rounded-xl p-4 border ${sc.bg} ${sc.bd}`}>
+                <div className="flex items-start gap-3">
+                  <span className="text-xl shrink-0 mt-0.5">{sc.ico}</span>
+                  <div className="min-w-0">
+                    <p className={`text-base sm:text-lg font-bold ${sc.col}`}>{sig.label}</p>
+                    <p className="text-xs sm:text-sm text-slate-400 mt-0.5">{sig.reason}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Cards: スマホ横スクロール / PC 3列グリッド ── */}
+            <div className="overflow-x-auto snap-x -mx-4 px-4 pb-3"
+              style={{ WebkitOverflowScrolling: 'touch' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 288px)', gap: '12px' }}
+                className="sm:!grid-none"
+                id="card-grid">
+                {TF.map(({ iv, label }) => (
+                  <div key={iv} className="snap-start">
+                    <Card label={label} state={data[iv]} />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── 凡例 ── */}
+            <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50 text-xs text-slate-500 space-y-1">
+              <p className="font-semibold text-slate-400 mb-1">凡例</p>
+              <p>⚡ スクイーズ — BB幅が直近20本の平均より25%以上収縮。ブレイクアウト準備期間</p>
+              <p>💥 拡張中 — BB幅が直近20本の平均より30%以上拡大。高ボラティリティ状態</p>
+              <p>Hurst H&gt;0.55 = トレンド持続傾向 ／ H&lt;0.45 = 平均回帰傾向 ／ 0.45〜0.55 = ランダム</p>
+              <p>Z-Score ±2.0 超えは統計的異常値圏（±1σ内に約68%・±2σ内に約95%）</p>
+            </div>
+
+            {/* ── Footer ── */}
+            <p className="text-center text-xs text-slate-600">
+              {lastAt
+                ? `最終更新: ${lastAt.toLocaleTimeString('ja-JP')} ｜ 60秒ごと自動更新`
+                : 'Binance API からデータ取得中...'}
+              {' '}｜ データソース: Binance Public API
+            </p>
+          </main>
+        </div>
+      );
+    }
+
+    /* ═══════════════════════════════════════════════════════════════
+       レスポンシブ: sm以上はCSSグリッドに切り替え
+    ═══════════════════════════════════════════════════════════════ */
+    (function applyResponsiveGrid() {
+      function adjust() {
+        const grid = document.getElementById('card-grid');
+        if (!grid) return;
+        if (window.innerWidth >= 640) {
+          grid.style.gridTemplateColumns = 'repeat(3, minmax(0, 1fr))';
+        } else {
+          grid.style.gridTemplateColumns = 'repeat(3, 288px)';
+        }
+      }
+      window.addEventListener('resize', adjust);
+      // Reactレンダリング後に初回適用
+      setTimeout(adjust, 500);
+    })();
+
+    /* ─── マウント ─────────────────────────────────────────────── */
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
