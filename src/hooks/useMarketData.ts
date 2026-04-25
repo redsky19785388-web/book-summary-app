@@ -12,7 +12,10 @@ import {
   getBBStatus,
 } from '../utils/indicators'
 
-const API_BASE = '/binance/api/v3/klines'
+// dev: Viteプロキシ経由でCORSを回避、prod: Binance直接アクセス（CORSサポート済み）
+const API_BASE = import.meta.env.DEV
+  ? '/binance/api/v3/klines'
+  : 'https://api.binance.com/api/v3/klines'
 
 async function fetchKlines(symbol: string, interval: Interval, limit = 100): Promise<Kline[]> {
   const url = `${API_BASE}?symbol=${symbol}&interval=${interval}&limit=${limit}`
