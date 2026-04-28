@@ -171,3 +171,73 @@ export function calcDailyBudget(realizedPnl: number) {
   const isCritical = remaining > 0 && remaining < PROP_FIRM.maxRiskPerTrade * 2
   return { dailyLoss, remaining, remainingTrades, isBreached, isCritical }
 }
+
+// ─── Kelly基準（数学 / J.L. Kelly 1956） ────────────────────────────────────
+// 最適ベッティング分数: f = (b*p - q) / b  (b=R:R, p=勝率, q=1-p)
+
+export interface KellyResult {
+  full: number   // フルKelly（理論最大）
+  half: number   // ハーフKelly（実用推奨）
+  isPositive: boolean
+}
+
+export function calcKelly(winRate: number, rrRatio: number): KellyResult {
+  const p = Math.max(0.01, Math.min(0.99, winRate))
+  const b = Math.max(0.01, rrRatio)
+  const f = (b * p - (1 - p)) / b
+  const full = Math.max(0, f)
+  return { full, half: full / 2, isPositive: f > 0 }
+}
+
+// ─── 期待値（意思決定理論 / von Neumann-Morgenstern 1944） ───────────────────
+// EV = p × (gain) − q × (loss) = p × RR × risk − (1-p) × risk
+
+export function calcEV(winRate: number, rrRatio: number, riskAmount: number): number {
+  const p = Math.max(0, Math.min(1, winRate))
+  return p * rrRatio * riskAmount - (1 - p) * riskAmount
+}
+
+// ─── 破産確率（保険数理学 / 二項分布） ──────────────────────────────────────
+// P(破産) ≈ 連続してmaxLoss回負けが続く確率 (簡易モデル)
+// セッション内でmaxLoss/riskPerTrade回以上連続損失が起きる確率
+
+export function calcRoR(
+  winRate: number,
+  maxLoss: number,
+  riskPerTrade: number,
+  sessionTrades = 20,
+): number {
+  const p = Math.max(0.01, Math.min(0.99, winRate))
+  const lossProp = 1 - p
+  const ruinStreak = Math.max(1, Math.floor(maxLoss / riskPerTrade))
+
+  // P(ある特定の位置から連続ruinStreak敗) = (1-p)^ruinStreak
+  // セッション内でそのような開始点が起きる回数の期待値を上限として推定
+  const streakProb = Math.pow(lossProp, ruinStreak)
+  const attempts = Math.max(0, sessionTrades - ruinStreak + 1)
+  // ユニオン上界: P(少なくとも1回) ≤ attempts × streakProb
+  return Math.min(1, attempts * streakProb)
+}
+
+// ─── チルト検出（行動ファイナンス / プロスペクト理論） ──────────────────────
+// 損失後の感情的意思決定バイアスを連続損失数から判定
+
+export type TiltLevel = 'none' | 'caution' | 'warning' | 'stop'
+
+export interface TiltResult {
+  level: TiltLevel
+  message: string
+}
+
+export function detectTilt(consecutiveLosses: number): TiltResult {
+  if (consecutiveLosses <= 0) {
+    return { level: 'none', message: '通常の精神状態。規律あるトレードを継続してください。' }
+  }
+  if (consecutiveLosses === 1) {
+    return { level: 'caution', message: '1連敗。次のトレードは慎重に。シグナルが揃うまで待機。' }
+  }
+  if (consecutiveLosses === 2) {
+    return { level: 'warning', message: '2連敗。感情的なリベンジトレードの衝動に注意。一度チャートを閉じてください。' }
+  }
+  return { level: 'stop', message: `${consecutiveLosses}連敗。本日のトレードを即時停止してください。損失は取り返せますが、プロップ口座は取り返せません。` }
+}

@@ -241,3 +241,96 @@ describe('getBBStatus + getEntrySignal integration', () => {
     expect(result.label).not.toContain('★★')
   })
 })
+
+// ─── 多角的テスト11: SMAと価格の統計的不変条件（統計学） ────────────
+describe('[多角的11] SMAの数学的不変条件', () => {
+  it('SMAは最大値を超えず最小値を下回らない（有界性）', () => {
+    const values = [10, 50, 30, 90, 20, 70, 40, 60, 80, 100]
+    const sma = calculateSMA(values, 5)
+    const minV = Math.min(...values)
+    const maxV = Math.max(...values)
+    sma.forEach(s => {
+      expect(s).toBeGreaterThanOrEqual(minV)
+      expect(s).toBeLessThanOrEqual(maxV)
+    })
+  })
+
+  it('SMA(period=1) = 元データそのもの（自明なケース）', () => {
+    const values = [10, 20, 30, 40, 50]
+    expect(calculateSMA(values, 1)).toEqual(values)
+  })
+})
+
+// ─── 多角的テスト12: EMAの重み付けの正確性（情報理論） ───────────────
+describe('[多角的12] EMAの重み付け特性', () => {
+  it('EMAは直近データに強く反応する（SMAより感度が高い）', () => {
+    const stable = Array(30).fill(100)
+    const withJump = [...stable, 200]
+
+    const sma = calculateSMA(withJump, 20)
+    const ema = calculateEMA(withJump, 20)
+
+    const smaLast = sma[sma.length - 1]
+    const emaLast = ema[ema.length - 1]
+
+    // EMAは最新の200に対してSMAより大きく動く
+    expect(emaLast).toBeGreaterThan(smaLast)
+  })
+})
+
+// ─── 多角的テスト13: ATRとボラティリティの物理的意味 ─────────────────
+describe('[多角的13] ATRの対称性と正値性', () => {
+  it('ATRは常に正値（ボラティリティの絶対量）', () => {
+    const klines: Kline[] = Array.from({ length: 20 }, (_, i) => ({
+      openTime: i, open: 100, high: 100 + (i % 3 + 1) * 2, low: 100 - (i % 3 + 1),
+      close: 100 + (i % 2), volume: 1000, closeTime: i + 1,
+    }))
+    const atr = calculateATR(klines, 10)
+    atr.forEach(v => expect(v).toBeGreaterThan(0))
+  })
+
+  it('ボラティリティゼロ（高=安=終=前終） → ATR=0', () => {
+    const klines: Kline[] = Array.from({ length: 20 }, (_, i) => ({
+      openTime: i, open: 100, high: 100, low: 100, close: 100, volume: 1000, closeTime: i + 1,
+    }))
+    const atr = calculateATR(klines, 10)
+    expect(atr[atr.length - 1]).toBeCloseTo(0, 6)
+  })
+})
+
+// ─── 多角的テスト14: MACD信号処理の単調性検証 ───────────────────────
+describe('[多角的14] MACDの反転検出能力（信号処理）', () => {
+  it('下落→上昇 転換点でMACDヒストグラムが最初より最後で大きい（遅行性を考慮）', () => {
+    // 十分なデータを与えてMACDが収束する時間を確保
+    const declining = Array.from({ length: 60 }, (_, i) => 300 - i * 2)
+    const rising    = Array.from({ length: 60 }, (_, i) => 180 + i * 2)
+    const prices = [...declining, ...rising]
+    const macd = calculateMACD(prices)
+
+    // 最初の数値と最後の数値を比較（遅行指標のため後半が高くなる）
+    const first = macd[0].histogram
+    const last  = macd[macd.length - 1].histogram
+    expect(last).toBeGreaterThan(first)
+  })
+})
+
+// ─── 多角的テスト15: Hurstとトレンド強度の複雑系的検証 ─────────────
+describe('[多角的15] Hurst指数の分類精度（フラクタル幾何学）', () => {
+  it('平均回帰列（ジグザグ）→ H < 0.5 傾向', () => {
+    // 強い平均回帰: 100, 110, 90, 110, 90, ...
+    const meanReverting = Array.from({ length: 60 }, (_, i) =>
+      100 + (i % 2 === 0 ? 15 : -15)
+    )
+    const h = estimateHurst(meanReverting)
+    // 理論的にはH<0.5だが推定誤差を考慮して0.6以下を検証
+    expect(h).toBeLessThan(0.6)
+  })
+
+  it('トレンド vs 平均回帰でHurst値が異なる方向に動く', () => {
+    const trend = Array.from({ length: 60 }, (_, i) => 100 + i * 3)
+    const zigzag = Array.from({ length: 60 }, (_, i) => 100 + (i % 2 === 0 ? 10 : -10))
+    const hTrend  = estimateHurst(trend)
+    const hZigzag = estimateHurst(zigzag)
+    expect(hTrend).toBeGreaterThan(hZigzag)
+  })
+})

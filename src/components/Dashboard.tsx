@@ -4,6 +4,7 @@ import { useAlertSystem } from '../hooks/useAlertSystem'
 import TimeframeCard from './TimeframeCard'
 import ActionPanel from './ActionPanel'
 import LotCalculator from './LotCalculator'
+import AdvancedRiskPanel from './AdvancedRiskPanel'
 import NotificationSettings from './NotificationSettings'
 import { getEntrySignal } from '../utils/indicators'
 import { getActionState } from '../utils/propfirm'
@@ -160,6 +161,9 @@ export default function Dashboard() {
 
         {/* ── ロット計算機 ── */}
         <LotCalculator currentPrice={currentPrice} />
+
+        {/* ── 高度リスク分析 ── */}
+        <AdvancedRiskPanel />
 
         {/* ── 凡例 ── */}
         <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50 text-xs text-slate-500">
