@@ -540,6 +540,9 @@
               </div>
             </div>
 
+            {/* ── ロット計算機 ── */}
+            <LotCalc price={price} />
+
             {/* ── 凡例 ── */}
             <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50 text-xs text-slate-500 space-y-1">
               <p className="font-semibold text-slate-400 mb-1">凡例</p>
@@ -557,6 +560,102 @@
               {' '}｜ データソース: Binance Public API
             </p>
           </main>
+        </div>
+      );
+    }
+
+    /* ─── ロット計算ロジック ─────────────────────────────────────── */
+    const MAX_RISK = 100;
+    const ACCOUNT  = 10000;
+
+    function calcLotSize(entry, sl, risk) {
+      const diff = Math.abs(entry - sl);
+      if (diff === 0 || entry <= 0 || sl <= 0) return null;
+      const lots = risk / diff;
+      return {
+        lots,
+        posUsd: lots * entry,
+        diff,
+        dir: entry > sl ? 'LONG 📈' : 'SHORT 📉',
+        riskPct: (risk / ACCOUNT * 100).toFixed(2),
+      };
+    }
+
+    /* ─── ロット計算機コンポーネント ─────────────────────────────── */
+    function LotCalc({ price }) {
+      const [entry,  setEntry]  = useState('');
+      const [sl,     setSl]     = useState('');
+      const [risk,   setRisk]   = useState(String(MAX_RISK));
+
+      // 現在価格が来たら自動セット（手動入力していない場合のみ）
+      const [autoFill, setAutoFill] = useState(true);
+      useEffect(() => {
+        if (price && autoFill) setEntry(price.toFixed(2));
+      }, [price, autoFill]);
+
+      const r = calcLotSize(parseFloat(entry), parseFloat(sl), Math.min(parseFloat(risk) || MAX_RISK, MAX_RISK));
+
+      return (
+        <div className="bg-slate-800 rounded-2xl border border-slate-700 overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-700">
+            <p className="font-bold text-slate-100">🧮 ロット計算機（損失 $100 以内）</p>
+            <p className="text-xs text-slate-500 mt-0.5">損切り幅から最大BTC数量を逆算します</p>
+          </div>
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-1 gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">① エントリー価格</label>
+                <input type="number" value={entry}
+                  onChange={e => { setAutoFill(false); setEntry(e.target.value); }}
+                  placeholder="例: 95000"
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                {!autoFill && price && (
+                  <button onClick={() => { setAutoFill(true); setEntry(price.toFixed(2)); }}
+                    className="mt-1 text-xs text-blue-400 underline">現在価格に戻す</button>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">② 損切り価格</label>
+                <input type="number" value={sl} onChange={e => setSl(e.target.value)}
+                  placeholder="例: 94500"
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">③ 許容損失（上限 $100）</label>
+                <input type="number" value={risk}
+                  onChange={e => setRisk(String(Math.min(parseFloat(e.target.value) || 0, MAX_RISK)))}
+                  className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+            </div>
+
+            {r ? (
+              <div className="rounded-xl border border-green-500/40 bg-green-950/30 overflow-hidden">
+                <div className="px-5 py-4 text-center border-b border-green-500/20">
+                  <p className="text-xs text-slate-400 uppercase tracking-widest mb-1">最大エントリー数量</p>
+                  <p className="text-5xl font-black text-green-400 font-mono">
+                    {r.lots < 0.001 ? r.lots.toFixed(6) : r.lots < 0.01 ? r.lots.toFixed(5) : r.lots.toFixed(4)}
+                  </p>
+                  <p className="text-xl font-bold text-green-300 mt-1">BTC</p>
+                </div>
+                <div className="grid grid-cols-3 divide-x divide-slate-700/50 text-center">
+                  {[
+                    { l: '価格差', v: '$' + r.diff.toLocaleString('en-US', { maximumFractionDigits: 2 }) },
+                    { l: 'ポジション規模', v: '$' + Math.round(r.posUsd).toLocaleString() },
+                    { l: '方向', v: r.dir },
+                  ].map(({ l, v }) => (
+                    <div key={l} className="px-3 py-3">
+                      <p className="text-xs text-slate-500 mb-1">{l}</p>
+                      <p className="text-sm font-mono font-semibold text-slate-200">{v}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-slate-700 bg-slate-800/40 px-5 py-6 text-center">
+                <p className="text-slate-500 text-sm">エントリー価格と損切り価格を入力してください</p>
+              </div>
+            )}
+          </div>
         </div>
       );
     }
